@@ -1,12 +1,12 @@
 # Specification: Loot Drops, Inventory & Crafting System
 
 **Document Status:** Authoritative Specification  
-**Version:** 1.4  
+**Version:** 1.5  
 **Project:** Labyrinth of Drones  
 **Target Engine:** Unity (FPS Microgame base)  
 **Audience:** Junior Engineering  
 **Last Updated:** 2026-11-06  
-**Supersedes:** Version 1.3
+**Supersedes:** Version 1.4
 
 This document is the single source of truth for the Loot, Inventory, and Crafting systems. All implementation must conform to this specification. Scaffolding code and any README checklists are supporting materials only and do not override this document.
 
@@ -115,15 +115,15 @@ Reserved resources **count toward the 999 total capacity**. While a reservation 
 Example:
 - Start: Scrap spendable = 990, reserved = 0.
 - `TryReserve(10)` → spendable = 980, reserved = 10. Total = 990.
-- Player collects Scrap. Only 9 more can be accepted (990 + 9 = 999). Further pickups are discarded.
-- On cancel, `RefundReservation()` moves the 10 from reserved back to spendable → spendable = 989, reserved = 0. Exact restoration, still ≤ 999.
+- Player collects Scrap. Only 9 more can be accepted (990 + 9 = 999) → spendable = 989, reserved = 10, total = 999. Further pickups are discarded.
+- On cancel, `RefundReservation()` moves the 10 from reserved back to spendable → spendable = 999, reserved = 0, total = 999. Exact restoration, still ≤ 999.
 
 **API behaviour:**
 
 - `TryReserve(scrap, circuitry)`:
   - Performs the same validation as `TrySpend` against **spendable** amounts.
   - On success, deducts the amounts from the spendable pools **and** records them in the internal reservation.
-  - Only one reservation may exist at a time. If a reservation is already active, `TryReserve` must return `false` (preferred) or first refund the previous reservation—implementation must pick one policy and document it.
+  - Only one reservation may exist at a time. If a reservation is already active, `TryReserve` must return `false` and must not change inventory or the existing reservation. The current reservation remains intact until it is explicitly committed or refunded. This is a fixed specification policy, not an implementation choice.
   - Raises `OnInventoryChanged` because spendable amounts have changed.
 - While a reservation is active:
   - The reserved amounts are **not** available for new spends or new reservations.
@@ -294,7 +294,7 @@ Disabling colliders and making rigidbodies kinematic alone is insufficient. Comp
 - Recommended LayerMask excludes the player, enemies, and triggers; it should primarily hit world geometry / ground.
 - Left mouse button places the real prefab at the hit point (if valid), calls `CommitReservation()`, and exits placement mode.
 - Right mouse button or Escape cancels placement, calls `RefundReservation()`, and exits placement mode.
-- Only one placement reservation may be active at a time.
+- Only one placement reservation may be active at a time. A second placement attempt while one is active is rejected: `TryReserve` returns `false` and the existing reservation and inventory remain unchanged (see §3.4).
 
 ---
 
@@ -368,7 +368,7 @@ These must be explicitly verified:
 - Duplicate calls to `DropLoot()` on the same enemy instance produce drops only once (idempotency guard).
 - Missing player reference, missing resultPrefab, or missing StructurePlacer causes the craft to fail with **no** resource loss.
 - Placement cancellation restores the exact reserved cost even if the player collects additional resources while placing.
-- Beginning a second placement while one is active either refunds the first or rejects the second; resources are never double-spent or double-refunded.
+- Beginning a second placement while one is active is rejected (`TryReserve` returns `false`); the first reservation and inventory remain unchanged, and resources are never double-spent or double-refunded.
 - Invalid loot-table ranges (min > max, negative amounts, chance outside 0–1) are rejected or safely clamped with a warning.
 - Ghost previews never execute gameplay behaviour (`Awake`/`OnEnable` of gameplay scripts do not run, including on inactive children; no shooting, no triggers, no damage).
 - Component discovery on the ghost uses `GetComponentsInChildren<T>(true)`.
@@ -392,6 +392,6 @@ The following are deliberately left open for later versions and must not be hard
 
 ## 10. Document Control
 
-This specification (v1.4) supersedes version 1.3 and all earlier informal descriptions.  
+This specification (v1.5) supersedes version 1.4 and all earlier informal descriptions.  
 Changes to behaviour require an update to this document and a new version number.  
 Implementation may begin only after this version has been reviewed and approved.
