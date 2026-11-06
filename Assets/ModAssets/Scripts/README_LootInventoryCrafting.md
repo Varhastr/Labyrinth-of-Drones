@@ -1,67 +1,46 @@
-# Loot, Inventory & Crafting System – Scaffolding (v1)
+# Loot, Inventory & Crafting – Implementation Notes
 
-This folder contains the complete scaffolding for the core resource loop of Labyrinth of Drones.
+**Authoritative specification:** `SPEC_LootInventoryCrafting.md` (currently **v1.3**)
 
-**Audience:** Junior engineering  
-**Status:** Ready for implementation & testing
+This README is supporting material only. In any conflict, the SPEC wins.
 
-## What is included
+## Current Status
 
-- `Inventory/` – Static inventory for Scrap + Circuitry + simple HUD
-- `Loot/` – LootTable, LootDropper, ScrapPickup, CircuitryPickup
-- `Crafting/` – CraftingRecipe (ScriptableObject), CraftingManager, StructurePlacer, CraftingUI
+- Specification is under Quality Engineering review (v1.3).
+- Scaffolding on this branch is **not** yet aligned with v1.3 rules.
+- Do **not** begin feature implementation until the specification is approved.
 
-## Integration Checklist (do in this order)
+## Key Rules Introduced / Tightened in v1.3
 
-1. Create the missing folders if Unity did not auto-generate them:
-   - `Assets/ModAssets/Prefabs/Loot/`
-   - `Assets/ModAssets/Prefabs/Crafted/`
-   - `Assets/ModAssets/ScriptableObjects/Recipes/`
+1. **True reservation / escrow model**  
+   Placement uses `TryReserve` → `CommitReservation` / `RefundReservation`.  
+   Simple “spend then Add back” is forbidden because it can lose resources at the 999 cap.
 
-2. Create two simple pickup prefabs:
-   - ScrapPickup.prefab (Collider = Trigger, Rigidbody, ScrapPickup script)
-   - CircuitryPickup.prefab (same, but CircuitryPickup script)
+2. **Safe ghost creation**  
+   Preview objects must be instantiated inactive (or under an inactive parent) so that `Awake`/`OnEnable` of gameplay scripts never run. Disabling components after a normal Instantiate is not sufficient.
 
-3. Create a LootTable ScriptableObject and assign the two pickup prefabs with the default chances from the spec (Scrap ~0.75, Circuitry ~0.35).
+3. **LootDropper idempotency**  
+   `DropLoot()` must contain a per-instance one-time guard. Repeated calls on the same enemy produce drops only once.
 
-4. Add the `LootDropper` component to every enemy prefab (HoverBot, Turret, etc.) and assign the LootTable.
+4. **Legacy loot integration**  
+   When an enabled `LootDropper` is present, the existing `LootPrefab` / `DropRate` path must be skipped for that enemy. Only a single call to `DropLoot()` is added to the death path.
 
-5. **Critical:** Wire `DropLoot()` into the existing enemy death logic.  
-   Look for the death / OnDie handling inside `EnemyController` (or equivalent) and add:
-   ```csharp
-   GetComponent<LootDropper>()?.DropLoot();
-   ```
-   Do **not** create a new death system.
+## After Specification Approval
 
-6. Create a GameObject in the scene with:
-   - CraftingManager
-   - StructurePlacer
-   Assign any starter recipes to the CraftingManager list.
+Once v1.3 (or a later approved version) is signed off:
 
-7. Build a minimal UI:
-   - InventoryUI on the HUD (two text fields for Scrap / Circuitry)
-   - CraftingUI + a simple recipe entry prefab that uses `RecipeEntryUI`
+1. Update the scaffolding code to match the SPEC exactly (especially Inventory reservation API, StructurePlacer ghost creation, and LootDropper guard).
+2. Create the required prefabs, LootTable, and four starter recipes.
+3. Wire the single `DropLoot()` call + legacy-skip into the existing enemy death path.
+4. Implement UI and run the full acceptance / edge-case test list in Section 8 of the SPEC.
 
-8. Create at least the four starter recipes listed in the original spec (Scrap Barrier, Makeshift SMG, Auto-Turret Mk1, Field Medkit).
+## Folder Layout (unchanged)
 
-9. Test the full loop:
-   - Kill an enemy → pickups appear and fly outward
-   - Walk over them → resource counters increase
-   - Press C (or configured key) → crafting menu opens
-   - Craft a structure → enter placement mode
-   - Left-click to place, Right-click / Escape to cancel (resources refunded)
-
-## Non-Goals for v1
-- No inventory slots / item list beyond the two resource counters
-- No save/load yet
-- No complex building grid or rotation gizmo
-- No power requirements or crafting stations that must be built first
-- Do not rewrite the existing enemy health or death system
-
-## Next Steps after this works
-- More interesting recipes
-- Better placement validation (slope, overlap, NavMesh)
-- Visual feedback (floating +X text, sounds, particles)
-- Survivor recruitment + base building (future systems)
-
-Once the full loop is working and tested, open a PR or notify the team so the feature can be reviewed and merged.
+```
+Assets/ModAssets/Scripts/
+  Inventory/
+  Loot/
+  Crafting/
+  SPEC_LootInventoryCrafting.md   ← authoritative
+  README_LootInventoryCrafting.md ← this file
+```

@@ -1,12 +1,12 @@
 # Specification: Loot Drops, Inventory & Crafting System
 
 **Document Status:** Authoritative Specification  
-**Version:** 1.2  
+**Version:** 1.3  
 **Project:** Labyrinth of Drones  
 **Target Engine:** Unity (FPS Microgame base)  
 **Audience:** Junior Engineering  
 **Last Updated:** 2026-11-06  
-**Supersedes:** Version 1.1
+**Supersedes:** Version 1.2
 
 This document is the single source of truth for the Loot, Inventory, and Crafting systems. All implementation must conform to this specification. Scaffolding code and any README checklists are supporting materials only and do not override this document.
 
@@ -24,7 +24,7 @@ This system is the foundation for later features (base building, survivor suppor
 - Simple inventory tracking two integer resources
 - Crafting menu driven by ScriptableObject recipes
 - Instantiation of weapon pickups
-- Ghost-preview placement of structures with guaranteed refund on cancel
+- Ghost-preview placement of structures with a true reservation model that guarantees exact refunds
 - Basic HUD display of current resources
 - Safe transaction handling (validate before spend, rollback on failure)
 
@@ -61,7 +61,8 @@ Resources never go below zero. Attempts to spend more than currently held must f
 ### 3.1 Responsibilities
 - Store current Scrap and Circuitry counts
 - Provide atomic spend operations
-- Notify listeners when values change
+- Support a true reservation (escrow) model for placement
+- Notify listeners when spendable values change
 - Support a full reset
 
 ### 3.2 Interface (required)
@@ -69,21 +70,27 @@ Resources never go below zero. Attempts to spend more than currently held must f
 ```csharp
 public static class Inventory
 {
-    public static int Scrap { get; }
-    public static int Circuitry { get; }
+    public static int Scrap { get; }          // currently spendable
+    public static int Circuitry { get; }      // currently spendable
 
     public static event System.Action OnInventoryChanged;
 
     public static void AddScrap(int amount);
     public static void AddCircuitry(int amount);
     public static bool TrySpend(int scrapCost, int circuitryCost);
+
+    // Reservation API (required for placement)
+    public static bool TryReserve(int scrapCost, int circuitryCost);
+    public static void CommitReservation();
+    public static void RefundReservation();
+
     public static void Reset();
 }
 ```
 
 ### 3.3 Rules
 
-- All mutations must keep values in the closed range **[0, 999]**.
+- All spendable values must stay in the closed range **[0, 999]**.
 - `AddScrap` / `AddCircuitry`:
   - If `amount <= 0`, the call is a no-op (no event raised).
   - Otherwise add the amount and clamp to 999.
@@ -93,9 +100,33 @@ public static class Inventory
   - Zero-cost recipes (both costs == 0) are **allowed**.
   - If the player does not have enough of either resource, return `false` and leave inventory unchanged.
   - On success, deduct both amounts atomically and raise `OnInventoryChanged`.
-- `OnInventoryChanged` must be raised after every successful mutation.
+- `OnInventoryChanged` must be raised after every successful mutation of spendable amounts.
 - Inventory is static and lives for the duration of a play session / run.
-- **Reset timing:** Call `Inventory.Reset()` on player death **and** when a new run / game session is started. Both events must clear the inventory.
+- **Reset timing:** Call `Inventory.Reset()` on player death **and** when a new run / game session is started. Both events must clear spendable amounts and any active reservation.
+
+### 3.4 Reservation / Escrow Model (Required)
+
+A simple “spend then Add back on cancel” approach is **not** sufficient because `Add` clamps at 999 and can permanently lose reserved value.
+
+**Required behaviour:**
+
+- `TryReserve(scrap, circuitry)`:
+  - Performs the same validation as `TrySpend`.
+  - On success, deducts the amounts from the spendable pools **and** records them in an internal reservation (escrow).
+  - Only one reservation may exist at a time. If a reservation is already active, `TryReserve` must return `false` (or first refund the previous reservation—implementation may choose either policy, but must be consistent and documented).
+  - Raises `OnInventoryChanged` because spendable amounts have changed.
+- While a reservation is active:
+  - The reserved amounts are **not** available for new spends or new reservations.
+  - HUD and affordability checks must use only the spendable (non-reserved) amounts.
+- `CommitReservation()`:
+  - Clears the reservation record. The resources stay spent. No inventory change occurs.
+- `RefundReservation()`:
+  - Adds the exact reserved amounts back to the spendable pools (still subject to the 999 clamp on the final value).
+  - Clears the reservation record.
+  - Raises `OnInventoryChanged`.
+- Confirm, cancel, and failure paths must settle a reservation **exactly once**. Double-commit or double-refund is forbidden.
+
+This model guarantees that a cancellation restores the economic value of the reservation even if the player collects additional resources while placing.
 
 ---
 
@@ -131,11 +162,17 @@ These values are the required defaults for v1. Designers may create additional t
 
 ### 4.3 Drop Behaviour
 When an enemy dies:
-1. The `LootDropper` component on that enemy evaluates its assigned LootTable.
+1. The `LootDropper` component on that enemy evaluates its assigned LootTable **at most once**.
 2. For every entry whose random roll succeeds (`Random.value <= chance`), a number of instances is chosen uniformly from `[minAmount, maxAmount]` (inclusive).
 3. Each instance is spawned near the enemy’s position (slight upward offset) and given a small upward + random horizontal impulse.
 
-### 4.4 Integration with Existing Enemy Death System (Critical)
+### 4.4 Idempotency Guard (Required)
+`LootDropper` must contain a per-instance one-time guard (e.g. a private `bool hasDropped` flag set to true on the first successful call to `DropLoot()`).  
+Subsequent calls to `DropLoot()` on the same instance must be ignored.  
+This guarantees that duplicate death callbacks cannot produce duplicate drops.  
+The guard lives on the component instance; it must not require changes to the broader enemy death system.
+
+### 4.5 Integration with Existing Enemy Death System (Critical)
 
 The existing `EnemyController.OnDie()` path already contains a legacy loot routine driven by `LootPrefab` and `DropRate`. The HoverBot prefab currently has a health pickup assigned at 100% drop rate.
 
@@ -146,7 +183,7 @@ The existing `EnemyController.OnDie()` path already contains a legacy loot routi
 - If no `LootDropper` is present, the legacy behaviour continues unchanged (backward compatible).
 - Do **not** rewrite, replace, or significantly restructure the existing death / health system. Only the single method call and a conditional skip of the legacy drop are permitted.
 
-### 4.5 Pickup Behaviour
+### 4.6 Pickup Behaviour
 - Pickups use a trigger collider.
 - On contact with the player they call the appropriate `Inventory.Add…` method and destroy themselves.
 - Pickups auto-destroy after a configurable lifetime (default 60 seconds) if not collected.
@@ -205,7 +242,7 @@ A craft is considered successful only when the requested output has been created
 
 **Required sequence:**
 
-1. Validate all dependencies **before** any resources are spent:
+1. Validate all dependencies **before** any resources are spent or reserved:
    - Recipe is non-null and registered.
    - Costs are ≥ 0.
    - For `WeaponPickup` and `Structure`/`Utility`: `resultPrefab` is non-null.
@@ -213,31 +250,37 @@ A craft is considered successful only when the requested output has been created
    - For `Consumable`: player health component can be located.
    - Player reference (if needed for spawning) can be located.
 2. If any validation fails → abort, log a warning, leave inventory unchanged, return failure.
-3. Call `Inventory.TrySpend`. If it returns false → abort, return failure.
+3. For `WeaponPickup` and `Consumable`: call `Inventory.TrySpend`.  
+   For `Structure`/`Utility`: call `Inventory.TryReserve`.
+   If the call returns false → abort, return failure.
 4. Attempt to create the result or begin placement.
-5. If step 4 fails for any reason → **immediately roll back** the exact resources that were spent and return failure.
-6. Only after step 4 succeeds is the craft considered complete.
+5. If step 4 fails for any reason → **immediately roll back**:
+   - For spend-based crafts: refund via `AddScrap` / `AddCircuitry`.
+   - For reserved crafts: call `RefundReservation()`.
+   Return failure.
+6. Only after step 4 succeeds is the craft considered complete.  
+   For structures, the reservation remains active until the player confirms placement (`CommitReservation`) or cancels (`RefundReservation`).
 
-### 5.6 Structure Placement & Refund Guarantee
+### 5.6 Structure Placement
 
-#### 5.6.1 Placement Flow
-- Entering placement mode creates a ghost instance of the result prefab.
-- The ghost must have all colliders disabled and all Rigidbodies set to kinematic.
-- **All MonoBehaviour scripts on the ghost and its children that could execute gameplay logic must be disabled** (or the ghost must be created in a way that prevents them from running). This prevents turrets from shooting, triggers from firing, etc., while the object is only a preview.
+#### 5.6.1 Safe Ghost Creation Sequence (Required)
+Ordinary `Instantiate()` followed by disabling components is **not** safe: `Awake` and `OnEnable` can already have run.
+
+**Required sequence:**
+
+1. Instantiate the preview prefab in an **inactive** state (or under an inactive parent) so that `Awake`/`OnEnable` do not run yet.
+2. Immediately disable all colliders, set all Rigidbodies to kinematic, and disable every `MonoBehaviour` that could execute gameplay logic.
+3. Only after the above safeguards are in place may the ghost be activated (if activation is required for rendering).
+4. The ghost must remain non-interactive for the entire preview lifetime.
+
+Disabling colliders and making rigidbodies kinematic alone is insufficient.
+
+#### 5.6.2 Placement Flow
 - Ghost follows a raycast from the main camera against a configurable LayerMask, clamped to a maximum distance (default 8 m).
 - Recommended LayerMask excludes the player, enemies, and triggers; it should primarily hit world geometry / ground.
-- Left mouse button places the real prefab at the hit point (if valid) and exits placement mode.
-- Right mouse button or Escape cancels placement.
-
-#### 5.6.2 Reservation / Escrow Model (Required)
-To guarantee that cancellation always restores the exact cost even if the inventory reaches 999 while the player is placing:
-
-- When placement mode begins successfully, the spent resources are considered **reserved**.
-- The reservation records the exact scrap and circuitry amounts that were deducted.
-- On successful placement the reservation is simply cleared (resources stay spent).
-- On cancel (or any failure while in placement mode) the exact reserved amounts are added back via `AddScrap` / `AddCircuitry`.
-- Because `Add` clamps at 999, the player may end at 999, but they will never permanently lose the reserved resources due to the cap.
-- Only one placement reservation may be active at a time. Attempting to begin a new placement while one is already active must cancel the previous reservation (refunding it) before starting the new one, or simply reject the new request. The safer default is to cancel & refund the previous one.
+- Left mouse button places the real prefab at the hit point (if valid), calls `CommitReservation()`, and exits placement mode.
+- Right mouse button or Escape cancels placement, calls `RefundReservation()`, and exits placement mode.
+- Only one placement reservation may be active at a time.
 
 ---
 
@@ -245,14 +288,14 @@ To guarantee that cancellation always restores the exact cost even if the invent
 
 ### 6.1 Inventory HUD
 - Always visible during gameplay (or easily toggled).
-- Displays current Scrap and Circuitry counts.
+- Displays current **spendable** Scrap and Circuitry counts (i.e. values after any active reservation has been deducted).
 - Updates immediately when `OnInventoryChanged` fires.
 
 ### 6.2 Crafting Menu
 - Opened / closed by a single configurable key (default recommendation: C).
 - Lists every recipe registered with the CraftingManager.
 - Each entry shows name, description, costs, and icon.
-- Craft button is disabled when the player cannot afford the recipe or when a placement reservation is already active.
+- Craft button is disabled when the player cannot afford the recipe or when a reservation is already active.
 - Menu should close (or become non-interactive) when placement mode begins.
 
 UI technology may be Unity UI or TextMeshPro. Visual polish is secondary to functional correctness in v1.
@@ -291,29 +334,30 @@ The system is considered complete for v1 when all of the following pass.
 
 ### 8.1 Functional Acceptance
 1. Killing an enemy that has a correctly configured LootDropper produces the expected pickups with impulse and does **not** also produce the legacy LootPrefab drop.
-2. Walking over Scrap and Circuitry pickups increases the corresponding counters and the HUD updates. Collecting when already at 999 leaves the value at 999.
+2. Walking over Scrap and Circuitry pickups increases the corresponding spendable counters and the HUD updates. Collecting when already at 999 leaves the value at 999.
 3. The crafting menu opens/closes with the configured key and lists all registered recipes.
 4. Recipes the player cannot afford have a disabled craft button.
 5. Crafting a WeaponPickup recipe spawns the prefab near the player and deducts the correct resources.
-6. Crafting a Structure recipe enters placement mode, shows a non-interactive ghost, and allows placement with left click.
-7. Cancelling placement restores the exact resources that were reserved.
-8. Inventory values never go negative or exceed 999 under any tested sequence.
+6. Crafting a Structure recipe enters placement mode, shows a non-interactive ghost created via the safe inactive sequence, and allows placement with left click.
+7. Cancelling placement restores the exact reserved resources via `RefundReservation`.
+8. Inventory spendable values never go negative or exceed 999 under any tested sequence.
 9. Only a single call to `DropLoot()` plus a conditional skip of the legacy drop has been added to the death path.
 
 ### 8.2 Required Edge-Case / Safety Tests
 These must be explicitly verified:
 
-- Negative spend costs are rejected; inventory is unchanged.
+- Negative spend / reserve costs are rejected; inventory is unchanged.
 - Zero-cost recipes succeed (if all other validation passes).
 - Negative or zero addition amounts are ignored.
 - Inventory is correctly clamped at both 0 and 999.
-- Duplicate calls to the death path on the same enemy do not produce extra drops beyond one evaluation of the LootTable.
+- Duplicate calls to `DropLoot()` on the same enemy instance produce drops only once (idempotency guard).
 - Missing player reference, missing resultPrefab, or missing StructurePlacer causes the craft to fail with **no** resource loss.
-- Placement cancellation restores the exact reserved cost even if the player’s inventory was at or near 999 during placement.
+- Placement cancellation restores the exact reserved cost even if the player collects additional resources (including reaching the 999 cap) while placing.
 - Beginning a second placement while one is active either refunds the first or rejects the second; resources are never double-spent or double-refunded.
 - Invalid loot-table ranges (min > max, negative amounts, chance outside 0–1) are rejected or safely clamped with a warning.
-- Ghost previews do not execute gameplay behaviour (no shooting, no triggers, no damage, etc.).
+- Ghost previews never execute gameplay behaviour (`Awake`/`OnEnable` of gameplay scripts do not run, no shooting, no triggers, no damage).
 - Recipe duplicate IDs are rejected on registration.
+- `CommitReservation` and `RefundReservation` each settle a reservation exactly once.
 
 ---
 
@@ -332,6 +376,6 @@ The following are deliberately left open for later versions and must not be hard
 
 ## 10. Document Control
 
-This specification (v1.2) supersedes version 1.1 and all earlier informal descriptions.  
+This specification (v1.3) supersedes version 1.2 and all earlier informal descriptions.  
 Changes to behaviour require an update to this document and a new version number.  
 Implementation may begin only after this version has been reviewed and approved.
